@@ -1,0 +1,48 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Valkey Custom Resource — operator variant
+#
+# Use this INSTEAD of k8s/valkey.yaml when you want to test your valkey-operator.
+#
+# IMPORTANT: Adapt the `spec` fields below to match YOUR operator's CRD schema.
+# This file uses a generic but common structure — your operator may use
+# different field names (e.g. `image`, `resources`, `persistence`, etc.).
+#
+# Step-by-step:
+#   1. Delete (or remove from kustomization.yaml) the plain valkey.yaml
+#   2. Apply your operator's CRDs (if not already installed)
+#   3. kubectl apply -f k8s/valkey-operator/valkey-cr.yaml
+#   4. Verify your operator creates a Service named "valkey" in namespace "bookstore"
+#      If the Service name is different, update VALKEY_HOST in k8s/app.yaml ConfigMap.
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: valkey.io/v1alpha1      # ← adjust to your operator's API group/version
+kind: Valkey                         # ← adjust to your operator's Kind name
+metadata:
+  name: valkey                       # operator will typically create a Service with this name
+  namespace: bookstore
+spec:
+  # ── Adjust the fields below to match your operator's CRD spec ───────────────
+
+  # Number of Valkey replicas
+  replicas: 1
+
+  # Valkey container image
+  image: valkey/valkey:8-alpine
+
+  # Resource requests/limits for the Valkey pod(s)
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "200m"
+      memory: "256Mi"
+
+  # Persistence (optional — comment out for ephemeral in-memory only)
+  # storage:
+  #   size: 1Gi
+  #   storageClassName: standard   # use "standard" for kind
+
+  # Additional Valkey configuration (optional)
+  # config:
+  #   maxmemory: "128mb"
+  #   maxmemory-policy: "allkeys-lru"

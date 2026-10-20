@@ -1,0 +1,23 @@
+apiVersion: cache.cs.sap.com/v1alpha1
+kind: Valkey
+metadata:
+  name: valkey 
+  namespace: bookstore 
+spec:
+  version: "8.1.4"
+  replicas: 3
+    # Resource requests/limits for the Valkey pod(s)
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "200m"
+      memory: "256Mi"
+  sentinel:
+    enabled: true 
+  metrics:
+    enabled: true
+    exporterVersion: "1.92.0"
+  tls:
+    enabled: true   # set to true to enable TLS; also set VALKEY_TLS_ENABLED=true in app.yaml ConfigMap

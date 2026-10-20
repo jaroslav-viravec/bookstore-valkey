@@ -1,0 +1,132 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bookstore-config
+  namespace: bookstore
+data:
+  # Direct connection (used when VALKEY_SENTINEL_ENABLED=false)
+  VALKEY_HOST: "valkey-valkey-primary"
+  VALKEY_PORT: "6379"
+  # Sentinel connection — set VALKEY_SENTINEL_ENABLED=true to activate.
+  # VALKEY_SENTINEL_HOSTS must list the sentinel service host:port created by the operator.
+  VALKEY_SENTINEL_ENABLED: "true"
+  VALKEY_SENTINEL_HOSTS: "valkey-valkey:26379"
+  VALKEY_SENTINEL_MASTER_NAME: "myprimary"
+  # TLS — set to "true" when the Valkey CR has tls.enabled: true.
+  # The operator creates secret valkey-<cr-name>-crt with ca.crt / tls.crt / tls.key.
+  VALKEY_TLS_ENABLED: "true"
+  VALKEY_TLS_CA_CERT: "/certs/ca.crt"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bookstore
+  namespace: bookstore
+  labels:
+    app: bookstore
+    app.kubernetes.io/name: bookstore
+    app.kubernetes.io/component: api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bookstore
+  template:
+    metadata:
+      labels:
+        app: bookstore
+    spec:
+      initContainers:
+      # When TLS is enabled the operator generates the valkey-valkey-crt secret
+      # asynchronously, so the app pod can start before /certs/ca.crt exists (the
+      # volume is optional). Block the app until the CA cert is present. When TLS
+      # is disabled this is a no-op, so the same manifest works in both modes.
+      - name: wait-for-tls-cert
+        image: bookstore-api:latest
+        imagePullPolicy: Never
+        command:
+        - /bin/sh
+        - -c
+        - |
+          if [ "$VALKEY_TLS_ENABLED" != "true" ]; then
+            echo "TLS disabled; skipping CA cert wait."
+            exit 0
+          fi
+          echo "TLS enabled; waiting for $VALKEY_TLS_CA_CERT ..."
+          until [ -f "$VALKEY_TLS_CA_CERT" ]; do
+            sleep 2
+          done
+          echo "CA cert present; starting app."
+        envFrom:
+        - configMapRef:
+            name: bookstore-config
+        volumeMounts:
+        - name: valkey-tls
+          mountPath: /certs
+          readOnly: true
+      containers:
+      - name: bookstore
+        image: bookstore-api:latest
+        # imagePullPolicy: Never is required for kind when loading images
+        # via `kind load docker-image`. Change to IfNotPresent if you push
+        # the image to a registry.
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8080
+          name: http
+        envFrom:
+        - configMapRef:
+            name: bookstore-config
+        env:
+        - name: VALKEY_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: valkey-valkey
+              key: valkey-password
+        volumeMounts:
+        - name: valkey-tls
+          mountPath: /certs
+          readOnly: true
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "256Mi"
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 15
+          timeoutSeconds: 5
+      volumes:
+      - name: valkey-tls
+        secret:
+          # Secret name pattern: valkey-<cr-name>-crt (created by the operator)
+          secretName: valkey-valkey-crt
+          optional: true   # pod still starts when TLS is disabled and secret doesn't exist
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bookstore
+  namespace: bookstore
+  labels:
+    app: bookstore
+spec:
+  selector:
+    app: bookstore
+  ports:
+  - port: 80
+    targetPort: 8080
+    name: http
+  type: ClusterIP
