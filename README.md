@@ -12,7 +12,7 @@ A minimal, self-contained bookstore REST API where **Valkey is the only datastor
 | [k8s/valkey-operator/own-valkey.yaml](k8s/valkey-operator/own-valkey.yaml) | `cache.cs.sap.com/v1alpha1` Valkey CR | The operator-managed Valkey used by this demo (sentinel + TLS on) |
 | [k8s/valkey-operator/valkey-cr.yaml](k8s/valkey-operator/valkey-cr.yaml) | Generic CR template | Reference only — for adapting to other operators |
 | [k8s/valkey.yaml](k8s/valkey.yaml) | `valkey/valkey:8-alpine` | Optional baseline (plain Deployment, **not** wired into kustomize) |
-| [scripts/](scripts/) | bash + curl + kubectl | `deploy.sh`, `add-data-to-valkey.sh`, `test-api.sh`, `delete-data-from-valkey.sh`, `remove.sh` — automate deploy/seed/test/cleanup |
+| [scripts/](scripts/) | bash + curl + kubectl | `deploy.sh`, `add-data-to-valkey.sh`, `test-api.sh`, `delete-data-from-valkey.sh`, `remove.sh` — automate deploy/seed/test/cleanup; `valkey-ctl.sh` — monitor the primary + online version upgrades |
 
 ## How the operator provisions Valkey
 
@@ -259,6 +259,73 @@ kubectl exec -it -n bookstore valkey-valkey-node-0 -c sentinel -- \
 
 ---
 
+## Monitoring & upgrading Valkey
+
+[scripts/valkey-ctl.sh](scripts/valkey-ctl.sh) is a single control script for watching
+which pod is the primary and for performing an **online** version upgrade (bump the CR's
+`spec.version`; the operator rolls the pods one at a time while Sentinel fails the primary
+over). It works against **any** Valkey CR in **any** namespace and auto-detects whether
+Sentinel is enabled — so it also handles plain master/replica (and standalone) setups.
+
+```bash
+# Watch where the primary is (loop, or --once for a single snapshot)
+./scripts/valkey-ctl.sh watch -n bookstore --name valkey
+
+# Online upgrade (operator re-renders + rolling-updates the StatefulSet)
+./scripts/valkey-ctl.sh upgrade 9.1.2 -n bookstore --name valkey
+
+# Downgrade is just an upgrade to an older version
+./scripts/valkey-ctl.sh upgrade 8.1.4 -n bookstore --name valkey
+```
+
+The two flags you always pass are `-n/--namespace` and `--name` (the **Valkey CR** name,
+from `kubectl get valkey -A`). Everything else — StatefulSet(s), password secret, TLS,
+image repos, Sentinel-vs-master/replica — is discovered from the live cluster.
+
+**Measuring failover (`--measure`, upgrade only).** Captures two millisecond
+measurements during the roll and writes them to a per-migration **report file**
+`<namespace>.<cr-name>.<timestamp>.log` (location via `--log-dir`, default: current dir);
+stdout just shows the file path. The report contains:
+
+- **Sentinel failover timing** — subscribes to Sentinel events and reports *new primary
+  promoted (writable)* and *full failover (`+switch-master`)*. Sentinel mode only.
+- **Client write-downtime** — a short-lived in-cluster probe pod tight-loops `SET` against
+  the current primary and reports the real outage window. Works in both modes. Requires `jq`.
+
+```bash
+./scripts/valkey-ctl.sh upgrade 9.1.2 -n bookstore --name valkey --measure
+./scripts/valkey-ctl.sh upgrade 9.1.2 -n bookstore --name valkey --measure --log-dir ./upgrade-logs
+```
+
+The report file looks like:
+
+```text
+# Valkey failover / availability measurement
+namespace:    bookstore
+cr:           valkey
+mode:         sentinel
+from_version: 8.1.4
+to_version:   9.1.2
+...
+== Client write-downtime (windows where writes failed) ==
+  window #1:  2293 ms (1 failed writes)   <- failover
+  ---
+  longest window: 2293 ms   total write-unavailable: 2293 ms across 1 window(s)
+  samples: ok=4988 fail=1
+
+== Sentinel failover timing (first failover) ==
+  new primary promoted (writable):  1060 ms  (from Sentinel starting the failover)
+  full failover (+switch-master):   1153 ms  (incl. replica reconfig)
+```
+
+> **Note:** `upgrade` patches the **live** CR only — the on-disk
+> [own-valkey.yaml](k8s/valkey-operator/own-valkey.yaml) is unchanged, so a later
+> `deploy.sh` / `kubectl apply -k` reverts to the version pinned there. Add `--load` when
+> the target image can't be pulled by kind (pulls + `kind load` the new images first).
+> Run `./scripts/valkey-ctl.sh` with no args to see all flags.
+
+---
+
 ## Toggling Sentinel / TLS
 
 Both are on by default. To change a mode, keep the app ConfigMap and the CR in sync.
@@ -283,7 +350,7 @@ Both are on by default. To change a mode, keep the app ConfigMap and the CR in s
 
 ## Project structure
 
-```
+```text
 bookstore-valkey/
 ├── app/
 │   ├── main.py               # FastAPI bookstore (valkey-py; Sentinel + TLS aware)
@@ -302,6 +369,7 @@ bookstore-valkey/
 │   ├── add-data-to-valkey.sh      # seed 8 sample books via the API
 │   ├── delete-data-from-valkey.sh # delete all books via the API (data only)
 │   ├── test-api.sh                # guided end-to-end API walkthrough
+│   ├── valkey-ctl.sh              # watch the primary + online Valkey version upgrades
 │   └── remove.sh                  # delete the Valkey CR + namespace (runs operator finalizers)
 ├── kind-config.yaml          # optional: kind cluster with host port mapping
 └── README.md
